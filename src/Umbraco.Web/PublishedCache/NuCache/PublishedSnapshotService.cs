@@ -57,7 +57,8 @@ namespace Umbraco.Web.PublishedCache.NuCache
 
         private BPlusTree<int, ContentNodeKit> _localContentDb;
         private BPlusTree<int, ContentNodeKit> _localMediaDb;
-        private bool _localDbExists;
+        private bool _localContentDbExists;
+        private bool _localMediaDbExists;
 
         // define constant - determines whether to use cache when previewing
         // to store eg routes, property converted values, anything - caching
@@ -128,10 +129,13 @@ namespace Umbraco.Web.PublishedCache.NuCache
                         var path = GetLocalFilesPath();
                         var localContentDbPath = Path.Combine(path, "NuCache.Content.db");
                         var localMediaDbPath = Path.Combine(path, "NuCache.Media.db");
-                        _localDbExists = File.Exists(localContentDbPath) && File.Exists(localMediaDbPath);
+                        _localContentDbExists = File.Exists(localContentDbPath);
+                        _localMediaDbExists = File.Exists(localMediaDbPath);
                         // if both local databases exist then GetTree will open them, else new databases will be created
-                        _localContentDb = BTree.GetTree(localContentDbPath, _localDbExists);
-                        _localMediaDb = BTree.GetTree(localMediaDbPath, _localDbExists);
+                        _localContentDb = BTree.GetTree(localContentDbPath, _localContentDbExists);
+                        _localMediaDb = BTree.GetTree(localMediaDbPath, _localMediaDbExists);
+
+                        _logger.Info<PublishedSnapshotService>($"Registered with MainDom, local content db exists? {_localContentDbExists}, local media db exists? {_localMediaDbExists}");
                     },
                     () =>
                     {
@@ -140,10 +144,23 @@ namespace Umbraco.Web.PublishedCache.NuCache
                         lock (_storesLock)
                         {
                             _contentStore?.ReleaseLocalDb(); //null check because we could shut down before being assigned
+                            // Make sure the local dbs are disposed of if the content store was not created.
+                            try
+                            {
+                                _localContentDb?.Dispose();
+                            }
+                            catch { /* Carry on with cleanup */ }
                             _localContentDb = null;
                             _mediaStore?.ReleaseLocalDb(); //null check because we could shut down before being assigned
+                            try
+                            {
+                                _localMediaDb?.Dispose();
+                            }
+                            catch { }
                             _localMediaDb = null;
                         }
+
+                        _logger.Info<PublishedSnapshotService>("Released from MainDom");
                     });
 
                 // stores are created with a db so they can write to it, but they do not read from it,
@@ -183,11 +200,15 @@ namespace Umbraco.Web.PublishedCache.NuCache
                     var okContent = false;
                     var okMedia = false;
 
-                    if (_localDbExists)
+                    if (_localContentDbExists)
                     {
                         okContent = LockAndLoadContent(LoadContentFromLocalDbLocked);
                         if (!okContent)
-                            _logger.Warn<PublishedSnapshotService>("Loading content from local db raised warnings, will reload from database.");
+                            _logger.Warn<PublishedSnapshotService>("Loading content from local db raised warnings, will reload from database.");                        
+                    }
+
+                    if (_localMediaDbExists)
+                    {
                         okMedia = LockAndLoadMedia(LoadMediaFromLocalDbLocked);
                         if (!okMedia)
                             _logger.Warn<PublishedSnapshotService>("Loading media from local db raised warnings, will reload from database.");

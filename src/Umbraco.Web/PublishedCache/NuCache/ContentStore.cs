@@ -128,7 +128,8 @@ namespace Umbraco.Web.PublishedCache.NuCache
                 Monitor.Enter(_rlocko, ref rtaken);
 
                 // see SnapDictionary
-                try { } finally
+                try { }
+                finally
                 {
                     _wlocked++;
                     lockInfo.Count = true;
@@ -234,11 +235,24 @@ namespace Umbraco.Web.PublishedCache.NuCache
             var lockInfo = new WriteLockInfo();
             try
             {
-                Lock(lockInfo);
+                try
+                {
+                    // Trying to lock could throw exceptions so always make sure to clean up.
+                    Lock(lockInfo);
+                }
+                finally
+                {
+                    try
+                    {
+                        _localDb?.Dispose();
+                    }
+                    catch { /* TBD: May already be throwing so don't throw again */}
+                    finally
+                    {
+                        _localDb = null;
+                    }
+                }
 
-                if (_localDb == null) return;
-                _localDb.Dispose();
-                _localDb = null;
             }
             finally
             {
@@ -278,7 +292,7 @@ namespace Umbraco.Web.PublishedCache.NuCache
         public void UpdateContentTypes(IEnumerable<IPublishedContentType> types)
         {
             //nothing to do if this is empty, no need to lock/allocate/iterate/etc...            
-            if (!types.Any()) return; 
+            if (!types.Any()) return;
 
             var lockInfo = new WriteLockInfo();
             try

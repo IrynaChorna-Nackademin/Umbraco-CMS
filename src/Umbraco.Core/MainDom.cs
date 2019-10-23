@@ -70,7 +70,7 @@ namespace Umbraco.Core
             // we *cannot* use the process ID here because when an AppPool restarts it is
             // a new process for the same application path
 
-            var appPath = HostingEnvironment.ApplicationPhysicalPath;
+            var appPath = HostingEnvironment.ApplicationPhysicalPath.ToLowerInvariant();
             var hash = (appId + ":::" + appPath).ToSHA1();
 
             var lockName = "UMBRACO-" + hash + "-MAINDOM-LCK";
@@ -105,6 +105,12 @@ namespace Umbraco.Core
             lock (_locko)
             {
                 if (_signaled) return false;
+                if (_isMainDom == false)
+                {
+                    _logger.Warn<MainDom>("Register called when MainDom has not been acquired");
+                    return false;
+                }
+
                 install?.Invoke();
                 if (release != null)
                     _callbacks.Add(new KeyValuePair<int, Action>(weight, release));
@@ -124,32 +130,32 @@ namespace Umbraco.Core
                 if (_signaled) return;
                 if (_isMainDom == false) return; // probably not needed
                 _signaled = true;
-            }
 
-            try
-            {
-                _logger.Info<MainDom>("Stopping ({SignalSource})", source);
-                foreach (var callback in _callbacks.OrderBy(x => x.Key).Select(x => x.Value))
+                try
                 {
-                    try
+                    _logger.Info<MainDom>("Stopping ({SignalSource})", source);
+                    foreach (var callback in _callbacks.OrderBy(x => x.Key).Select(x => x.Value))
                     {
-                        callback(); // no timeout on callbacks
+                        try
+                        {
+                            callback(); // no timeout on callbacks
+                        }
+                        catch (Exception e)
+                        {
+                            _logger.Error<MainDom>(e, "Error while running callback");
+                            continue;
+                        }
                     }
-                    catch (Exception e)
-                    {
-                        _logger.Error<MainDom>(e, "Error while running callback, remaining callbacks will not run.");
-                        throw;
-                    }
-
+                    _logger.Debug<MainDom>("Stopped ({SignalSource})", source);
                 }
-                _logger.Debug<MainDom>("Stopped ({SignalSource})", source);
-            }
-            finally
-            {
-                // in any case...
-                _isMainDom = false;
-                _systemLocker?.Dispose();
-                _logger.Info<MainDom>("Released ({SignalSource})", source);
+                finally
+                {
+                    // in any case...
+                    _isMainDom = false;
+                    _systemLocker?.Dispose();
+                    _logger.Info<MainDom>("Released ({SignalSource})", source);
+                }
+
             }
         }
 
@@ -178,17 +184,23 @@ namespace Umbraco.Core
                 // if more than 1 instance reach that point, one will get the lock
                 // and the other one will timeout, which is accepted
 
-                //TODO: This can throw a TimeoutException - in which case should this be in a try/finally to ensure the signal is always reset?
-                _systemLocker = _systemLock.Lock(LockTimeoutMilliseconds);
+                //This can throw a TimeoutException - in which case should this be in a try/finally to ensure the signal is always reset.
+                try
+                {
+                    _systemLocker = _systemLock.Lock(LockTimeoutMilliseconds);
+                }                
+                finally
+                {
+                    // we need to reset the event, because otherwise we would end up
+                    // signaling ourselves and committing suicide immediately.
+                    // only 1 instance can reach that point, but other instances may
+                    // have started and be trying to get the lock - they will timeout,
+                    // which is accepted
+
+                    _signal.Reset();
+                }
                 _isMainDom = true;
-
-                // we need to reset the event, because otherwise we would end up
-                // signaling ourselves and committing suicide immediately.
-                // only 1 instance can reach that point, but other instances may
-                // have started and be trying to get the lock - they will timeout,
-                // which is accepted
-
-                _signal.Reset();
+               
 
                 //WaitOneAsync (ext method) will wait for a signal without blocking the main thread, the waiting is done on a background thread
 
@@ -209,15 +221,11 @@ namespace Umbraco.Core
         void IRegisteredObject.Stop(bool immediate)
         {
             OnSignal("environment"); // will run once
-            
-            if (immediate)
-            {
-                //only unregister when it's the final call, else we won't be notified of the final call
-                HostingEnvironment.UnregisterObject(this);
 
-                // The web app is stopping immediately, dispose eagerly
-                Dispose(true);
-            }
+            // The web app is stopping, need to wind down
+            Dispose(true);
+
+            HostingEnvironment.UnregisterObject(this);
         }
 
         #region IDisposable Support
@@ -239,7 +247,7 @@ namespace Umbraco.Core
                 disposedValue = true;
             }
         }
-                
+
         public void Dispose()
         {
             Dispose(true);
